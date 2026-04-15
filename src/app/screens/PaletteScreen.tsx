@@ -26,12 +26,14 @@ import { Input } from "../components/ui/input";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "../components/ui/dialog";
 import { PaintCard, Paint } from "../components/PaintCard";
-import { 
-  DEFAULT_CLUSTERS, 
+import {
+  DEFAULT_CLUSTERS,
   CLUSTER_DOT,
   PaletteCluster,
   AVAILABLE_COLORS,
 } from "../types/cluster";
+import { loadNodes } from "../lib/sessionService";
+import { generateImage, extractPaintMeta } from "../lib/openaiService";
 
 // --- Mock Data with positions ---
 const MOCK_PAINTS: Paint[] = [
@@ -169,9 +171,38 @@ const generateMessageId = () => {
 
 export function PaletteScreen() {
   const navigate = useNavigate();
-  const [paints, setPaints] = useState<Paint[]>(MOCK_PAINTS);
+  const [dbLoaded, setDbLoaded] = useState(false);
+  const [paints, setPaints] = useState<Paint[]>(() => {
+    // 초기값: localStorage fallback
+    try {
+      const saved = localStorage.getItem("ideation-paints");
+      if (saved) {
+        const parsed: Paint[] = JSON.parse(saved);
+        if (parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return MOCK_PAINTS;
+  });
   const [deletedPaints, setDeletedPaints] = useState<Paint[]>([]);
   const [showTrashModal, setShowTrashModal] = useState(false);
+
+  // DB에서 노드 로드 (Supabase 설정된 경우)
+  useEffect(() => {
+    const sessionId = localStorage.getItem("ideation-session-id");
+    if (!sessionId || dbLoaded) return;
+    loadNodes(sessionId).then((nodes) => {
+      if (nodes.length > 0) {
+        // x/y 좌표가 없으면 격자 배치
+        const positioned = nodes.map((n, i) => ({
+          ...n,
+          x: n.x ?? 120 + (i % 4) * 300,
+          y: n.y ?? 100 + Math.floor(i / 4) * 220,
+        }));
+        setPaints(positioned);
+      }
+      setDbLoaded(true);
+    });
+  }, [dbLoaded]);
   const [selectedPaint, setSelectedPaint] = useState<string | null>(null);
   const [editingPaint, setEditingPaint] = useState<string | null>(null);
   const [combineMode, setCombineMode] = useState(false);
@@ -201,6 +232,7 @@ export function PaletteScreen() {
   const [editingCluster, setEditingCluster] = useState<string | null>(null);
   const [mediaCreationMode, setMediaCreationMode] = useState<"image" | "video" | null>(null);
   const [isMediaCreationSession, setIsMediaCreationSession] = useState(false);
+  const [extractingMsgId, setExtractingMsgId] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -472,56 +504,53 @@ export function PaletteScreen() {
 
     setPaints(newPaints);
   };
-
-  const handleCombineWithSuggestion = (suggestion: CombineSuggestion) => {
+  const handleCombineWithSuggestion = async (suggestion: CombineSuggestion) => {
     if (combineSelection.length < 2) return;
 
     const selectedPaints = paints.filter((p) => combineSelection.includes(p.id));
     const paint1 = selectedPaints[0];
     const paint2 = selectedPaints[1];
-    
-    // 이미지/비디오 버튼 선택됨
+
     setCombineMethodSelected(true);
-    
-    // 선택한 합성 방식에 따라 메시지 추가
-    const typeText = suggestion.type === "image" ? "이미지" : "비디오";
+
+    const typeText = suggestion.type === "image" ? "이미지" : "핵심 장면 이미지";
     const confirmMsg: AgentMessage = {
       id: generateMessageId(),
       role: "assistant",
-      content: `"${paint1.title}"과(와) "${paint2.title}"을(를) ${typeText} 방식으로 합성해서 생각해보는 게 좋겠네요!`,
+      content: `"${paint1.title}"과(와) "${paint2.title}"을(를) ${typeText}로 합성합니다...`,
     };
-    
     setExploreMessages((prev) => [...prev, confirmMsg]);
-    
-    // 결과물 생성 시뮬레��션
-    setTimeout(() => {
-      const mockImages = [
-        "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800",
-        "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800",
-        "https://images.unsplash.com/photo-1469474968028-56623f02e42e?w=800",
-      ];
-      const randomImage = mockImages[Math.floor(Math.random() * mockImages.length)];
-      
+
+    try {
+      const prompt =
+        suggestion.type === "video"
+          ? `Cinematic keyframe combining two creative concepts: "${paint1.title}" (${paint1.content}) and "${paint2.title}" (${paint2.content}). Style: film still, cinematic lighting, evocative.`
+          : `Creative artwork combining "${paint1.title}" (${paint1.content}) with "${paint2.title}" (${paint2.content}). Style: artistic, evocative, visually striking.`;
+      const imageUrl = await generateImage(prompt);
+
       const resultMsg: AgentMessage = {
         id: generateMessageId(),
         role: "assistant",
-        content: "예상 결과물입니다:",
-        imageUrl: suggestion.type === "image" || suggestion.type === "video" ? randomImage : undefined,
+        content: suggestion.type === "video" ? "핵심 장면 이미지입니다 (동영상 생성 추후 지원):" : "생성된 이미지입니다:",
+        imageUrl,
         paintData: {
           title: `${paint1.title} × ${paint2.title}`,
           type: suggestion.type,
-          content: `"${paint1.title}"의 시각적 요소와 "${paint2.title}"의 감정을 결합한 결과물`,
+          content: `"${paint1.title}"와 "${paint2.title}"를 결합한 결과물`,
           source: "ai" as const,
           tags: ["combined"],
           cluster: selectedPaints[0].cluster,
-          imageUrl: suggestion.type === "image" ? randomImage : undefined,
-          videoUrl: suggestion.type === "video" ? randomImage : undefined,
+          imageUrl,
           derivedFrom: combineSelection,
         },
       };
-      
       setExploreMessages((prev) => [...prev, resultMsg]);
-    }, 1500);
+    } catch {
+      setExploreMessages((prev) => [
+        ...prev,
+        { id: generateMessageId(), role: "assistant", content: "이미지 생성에 실패했습니다. 다시 시도해주세요." },
+      ]);
+    }
   };
 
   const handleExploreSend = async () => {
@@ -732,21 +761,22 @@ export function PaletteScreen() {
     setIsMediaCreationSession(true);
 
     if (paint.type === "text") {
-      // 텍스트 카드 -> 자동 이미지 생성
+      // 텍스트 카드 -> DALL-E 3 이미지 생성
       const loadingMsg: AgentMessage = {
         id: generateMessageId(),
         role: "assistant",
         content: `"${paint.title}"을(를) 기반으로 이미지를 생성하겠습니다...`,
       };
       setExploreMessages((prev) => [...prev, loadingMsg]);
-      
-      setTimeout(() => {
-        const mockImageUrl = "https://images.unsplash.com/photo-1546380841-bf3afc314a5d?w=800";
+
+      try {
+        const prompt = `Creative visual artwork inspired by: "${paint.title}". ${paint.content}. Style: cinematic, evocative, artistic illustration.`;
+        const imageUrl = await generateImage(prompt);
         const imageMsg: AgentMessage = {
           id: generateMessageId(),
           role: "assistant",
           content: "생성된 이미지입니다:",
-          imageUrl: mockImageUrl,
+          imageUrl,
           paintData: {
             title: `시각화: ${paint.title}`,
             type: "image" as const,
@@ -754,12 +784,18 @@ export function PaletteScreen() {
             source: "ai" as const,
             tags: [...paint.tags, "generated"],
             cluster: "visual-tone",
-            imageUrl: mockImageUrl,
+            imageUrl,
           },
         };
         setExploreMessages((prev) => [...prev, imageMsg]);
         setMediaCreationMode(null);
-      }, 1500);
+      } catch {
+        setExploreMessages((prev) => [
+          ...prev,
+          { id: generateMessageId(), role: "assistant", content: "이미지 생성에 실패했습니다. 다시 시도해주세요." },
+        ]);
+        setMediaCreationMode(null);
+      }
     } else if (paint.type === "image") {
       // 이미지 카드 -> 수정 프롬프트 요청
       const aiMsg: AgentMessage = {
@@ -788,21 +824,22 @@ export function PaletteScreen() {
     setIsMediaCreationSession(true);
 
     if (paint.type === "text") {
-      // 텍스트 카드 -> 자동 비디오 생성
+      // 텍스트 카드 -> DALL-E로 키프레임 이미지 생성 (동영상 생성 API 미연동)
       const loadingMsg: AgentMessage = {
         id: generateMessageId(),
         role: "assistant",
-        content: `"${paint.title}"을(를) 기반으로 비디오를 생성하겠습니다...`,
+        content: `"${paint.title}"의 핵심 장면을 이미지로 먼저 시각화합니다...`,
       };
       setExploreMessages((prev) => [...prev, loadingMsg]);
-      
-      setTimeout(() => {
-        const mockVideoUrl = "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800";
+
+      try {
+        const prompt = `Cinematic keyframe still for a video concept: "${paint.title}". ${paint.content}. Style: cinematic photography, film still, high production value.`;
+        const imageUrl = await generateImage(prompt);
         const videoMsg: AgentMessage = {
           id: generateMessageId(),
           role: "assistant",
-          content: "생성된 비디오입니다:",
-          imageUrl: mockVideoUrl,
+          content: "핵심 장면 이미지입니다. (동영상 생성은 추후 지원 예정)",
+          imageUrl,
           paintData: {
             title: `영상화: ${paint.title}`,
             type: "video" as const,
@@ -810,12 +847,18 @@ export function PaletteScreen() {
             source: "ai" as const,
             tags: [...paint.tags, "generated"],
             cluster: "visual-tone",
-            videoUrl: mockVideoUrl,
+            imageUrl,
           },
         };
         setExploreMessages((prev) => [...prev, videoMsg]);
         setMediaCreationMode(null);
-      }, 1500);
+      } catch {
+        setExploreMessages((prev) => [
+          ...prev,
+          { id: generateMessageId(), role: "assistant", content: "이미지 생성에 실패했습니다. 다시 시도해주세요." },
+        ]);
+        setMediaCreationMode(null);
+      }
     } else if (paint.type === "video") {
       // 비디오 카드 -> 수정 프롬프트 요청
       const aiMsg: AgentMessage = {
@@ -1255,6 +1298,19 @@ export function PaletteScreen() {
                     onMouseDown={(e) => handleMouseDown(paint.id, e)}
                     onDoubleClick={() => handlePaintDoubleClick(paint.id)}
                   >
+                    {paint.paintKind && (
+                      <div className="absolute -top-2.5 left-3 z-10 flex gap-1">
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium border ${
+                          paint.paintKind === "explicit"
+                            ? "bg-blue-50 text-blue-600 border-blue-200"
+                            : paint.paintKind === "implicit"
+                            ? "bg-violet-50 text-violet-600 border-violet-200"
+                            : "bg-amber-50 text-amber-600 border-amber-200"
+                        }`}>
+                          {paint.paintKind === "explicit" ? "명시" : paint.paintKind === "implicit" ? "묵시" : "브릿지"}
+                        </span>
+                      </div>
+                    )}
                     <PaintCard
                       paint={paint}
                       size="medium"
@@ -1411,40 +1467,43 @@ export function PaletteScreen() {
                               >
                                 <p className="text-sm">{msg.content}</p>
                               </div>
-                              {msg.role === "assistant" && 
-                               exploreMessages.indexOf(msg) !== 0 && 
-                               combineMode && !isMediaCreationSession &&
-                               exploreMessages.filter(m => m.role === "user").length > 0 && (
+                              {msg.role === "assistant" && (
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={() => {
-                                    // 이 메시지 내용을 선택된 카드에 연결된 새 페인트로 추가
-                                    if (!combineSelection.length) return;
-                                    
-                                    const sourceId = combineSelection[0];
-                                    const sourcePaint = paints.find(p => p.id === sourceId);
-                                    
-                                    const newPaint: Paint = {
-                                      id: `p${Date.now()}`,
-                                      title: msg.content.slice(0, 30) + (msg.content.length > 30 ? "..." : ""),
-                                      type: "text",
-                                      content: msg.content,
-                                      source: "ai",
-                                      tags: ["explored"],
-                                      timestamp: new Date().toISOString(),
-                                      cluster: sourcePaint?.cluster || "visual-tone",
-                                      derivedFrom: combineSelection,
-                                      x: sourcePaint?.x || 1000,
-                                      y: (sourcePaint?.y || 600) + 250,
-                                    };
-                                    
-                                    setPaints([...paints, newPaint]);
+                                  disabled={extractingMsgId === msg.id}
+                                  onClick={async () => {
+                                    setExtractingMsgId(msg.id);
+                                    try {
+                                      const { label, description } = await extractPaintMeta(msg.content);
+                                      const sourceId = combineSelection[0];
+                                      const sourcePaint = paints.find(p => p.id === sourceId);
+                                      const newPaint: Paint = {
+                                        id: `p${Date.now()}`,
+                                        title: label,
+                                        type: "text",
+                                        content: description,
+                                        source: "ai",
+                                        tags: ["bridge"],
+                                        paintKind: "bridge",
+                                        timestamp: new Date().toISOString(),
+                                        cluster: sourcePaint?.cluster || "visual-tone",
+                                        derivedFrom: [...combineSelection],
+                                        x: sourcePaint ? sourcePaint.x! + 320 : 1000,
+                                        y: sourcePaint?.y ?? 600,
+                                      };
+                                      setPaints((prev) => [...prev, newPaint]);
+                                    } finally {
+                                      setExtractingMsgId(null);
+                                    }
                                   }}
-                                  className="mt-2 w-full gap-2 text-xs h-8"
+                                  className="mt-1.5 w-full gap-2 text-xs h-7 text-gray-500 hover:text-gray-800"
                                 >
-                                  <Plus className="w-3 h-3" />
-                                  연결 페인트로 추가하기
+                                  {extractingMsgId === msg.id ? (
+                                    <><span className="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin inline-block" />추출 중...</>
+                                  ) : (
+                                    <><Plus className="w-3 h-3" />텍스트 페인트로 추가</>
+                                  )}
                                 </Button>
                               )}
                             </div>
@@ -1510,8 +1569,28 @@ export function PaletteScreen() {
                   /* Explore Panel */
                   <div className="space-y-4">
                     {/* Selected Paint Info */}
-                    <div className="p-3 rounded-xl bg-gray-50 border border-gray-200">
+                    <div className="p-3 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
                       <PaintCard paint={selectedPaintData} size="compact" />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full justify-start gap-2 text-blue-600 border-blue-200 hover:bg-blue-50"
+                        onClick={() => {
+                          const src = selectedPaintData;
+                          const newPaint: Paint = {
+                            ...src,
+                            id: `p${Date.now()}`,
+                            timestamp: new Date().toISOString(),
+                            derivedFrom: [src.id],
+                            x: (src.x ?? 300) + 320,
+                            y: src.y ?? 200,
+                          };
+                          setPaints((prev) => [...prev, newPaint]);
+                        }}
+                      >
+                        <Plus className="w-4 h-4" />
+                        캔버스에 추가
+                      </Button>
                     </div>
 
                     {/* Quick Actions */}
@@ -1610,39 +1689,43 @@ export function PaletteScreen() {
                               >
                                 <p className="text-sm">{msg.content}</p>
                               </div>
-                              {msg.role === "assistant" && 
-                               exploreMessages.indexOf(msg) !== 0 && 
-                               !isMediaCreationSession &&
-                               exploreMessages.filter(m => m.role === "user").length > 0 && (
+                              {msg.role === "assistant" && exploreMessages.indexOf(msg) !== 0 && (
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={() => {
-                                    // 이 메시지 내용을 선택된 카드에 연결된 새 페인트로 추가
+                                  disabled={extractingMsgId === msg.id}
+                                  onClick={async () => {
                                     if (!selectedPaint) return;
-                                    
-                                    const sourcePaint = paints.find(p => p.id === selectedPaint);
-                                    
-                                    const newPaint: Paint = {
-                                      id: `p${Date.now()}`,
-                                      title: msg.content.slice(0, 30) + (msg.content.length > 30 ? "..." : ""),
-                                      type: "text",
-                                      content: msg.content,
-                                      source: "ai",
-                                      tags: ["explored"],
-                                      timestamp: new Date().toISOString(),
-                                      cluster: sourcePaint?.cluster || "visual-tone",
-                                      derivedFrom: [selectedPaint],
-                                      x: sourcePaint?.x || 1000,
-                                      y: (sourcePaint?.y || 600) + 250,
-                                    };
-                                    
-                                    setPaints([...paints, newPaint]);
+                                    setExtractingMsgId(msg.id);
+                                    try {
+                                      const { label, description } = await extractPaintMeta(msg.content);
+                                      const sourcePaint = paints.find(p => p.id === selectedPaint);
+                                      const newPaint: Paint = {
+                                        id: `p${Date.now()}`,
+                                        title: label,
+                                        type: "text",
+                                        content: description,
+                                        source: "ai",
+                                        tags: ["explored"],
+                                        paintKind: "implicit",
+                                        timestamp: new Date().toISOString(),
+                                        cluster: sourcePaint?.cluster || "visual-tone",
+                                        derivedFrom: [selectedPaint],
+                                        x: sourcePaint ? sourcePaint.x! + 300 : 1000,
+                                        y: sourcePaint?.y ?? 600,
+                                      };
+                                      setPaints((prev) => [...prev, newPaint]);
+                                    } finally {
+                                      setExtractingMsgId(null);
+                                    }
                                   }}
-                                  className="mt-2 w-full gap-2 text-xs h-8"
+                                  className="mt-1.5 w-full gap-2 text-xs h-7 text-gray-500 hover:text-gray-800"
                                 >
-                                  <Plus className="w-3 h-3" />
-                                  연결 페인트로 추가하기
+                                  {extractingMsgId === msg.id ? (
+                                    <><span className="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin inline-block" />추출 중...</>
+                                  ) : (
+                                    <><Plus className="w-3 h-3" />텍스트 페인트로 추가</>
+                                  )}
                                 </Button>
                               )}
                             </div>

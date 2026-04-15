@@ -19,6 +19,7 @@ export interface Paint {
   derivedFrom?: string[];
   pinned?: boolean;
   cluster?: string;
+  paintKind?: "explicit" | "implicit" | "bridge";
   imageUrl?: string;
   audioWaveform?: number[];
   x?: number;

@@ -97,5 +97,45 @@ export function toOpenAIPaint(
     tags: aiPaint.tags ?? [],
     timestamp: "Just now",
     cluster: aiPaint.cluster,
+    paintKind: aiPaint.paintKind,
   };
+}
+
+/** AI 텍스트에서 페인트 label/description 추출 */
+export async function extractPaintMeta(
+  text: string
+): Promise<{ label: string; description: string }> {
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "아래 텍스트에서 창의적 아이디어 페인트의 핵심을 추출하세요.\n반드시 JSON으로만 응답: {\"label\": \"2-4단어 핵심 키워드(한국어)\", \"description\": \"1-2문장 설명(한국어)\"}",
+      },
+      { role: "user", content: text },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.5,
+  });
+  const raw = response.choices[0].message.content ?? "{}";
+  const parsed = JSON.parse(raw) as { label?: string; description?: string };
+  return {
+    label: parsed.label ?? text.slice(0, 20),
+    description: parsed.description ?? text,
+  };
+}
+
+/** DALL-E 3으로 이미지 URL 생성 */
+export async function generateImage(prompt: string): Promise<string> {
+  const response = await client.images.generate({
+    model: "dall-e-3",
+    prompt,
+    n: 1,
+    size: "1024x1024",
+    quality: "standard",
+  });
+  const url = response.data[0]?.url;
+  if (!url) throw new Error("DALL-E 이미지 URL 없음");
+  return url;
 }

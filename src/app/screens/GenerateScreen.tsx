@@ -27,6 +27,7 @@ import {
   CLUSTER_BADGE
 } from "../types/cluster";
 import { sendToOpenAI, toOpenAIPaint, ConversationMessage } from "../lib/openaiService";
+import { getOrCreateSession, saveMessage, saveNode, loadMessages, loadNodes } from "../lib/sessionService";
 
 interface ChatMessage {
   id: string;
@@ -67,11 +68,50 @@ export function GenerateScreen() {
   const [collapsedClusters, setCollapsedClusters] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // 세션 초기화 + DB에서 이전 대화/페인트 복원
+  useEffect(() => {
+    (async () => {
+      const id = await getOrCreateSession();
+      setSessionId(id);
+      if (!id) return;
+
+      const [dbMessages, dbNodes] = await Promise.all([
+        loadMessages(id),
+        loadNodes(id),
+      ]);
+
+      if (dbMessages.length > 0) {
+        setMessages([
+          INITIAL_MESSAGES[0],
+          ...dbMessages.map((m, i) => ({
+            id: `db-${i}`,
+            role: m.role,
+            content: m.content,
+            extractable: false,
+          })),
+        ]);
+      }
+
+      if (dbNodes.length > 0) {
+        setPaints(dbNodes);
+        localStorage.setItem("ideation-paints", JSON.stringify(dbNodes));
+      }
+    })();
+  }, []);
+
+  // localStorage fallback (Supabase 미설정 시)
+  useEffect(() => {
+    if (paints.length > 0) {
+      localStorage.setItem("ideation-paints", JSON.stringify(paints));
+    }
+  }, [paints]);
 
   // 채팅 컨텍스트 기반으로 클러스터 자동 결정
   const inferClusterFromContent = (content: string): string => {
@@ -147,6 +187,9 @@ export function GenerateScreen() {
     setIsLoading(true);
     setError(null);
 
+    // 유저 메시지 DB 저장
+    if (sessionId) await saveMessage(sessionId, "user", userContent);
+
     try {
       // 전체 대화 히스토리를 OpenAI에 전달 (시스템 프롬프트 제외)
       const history: ConversationMessage[] = [
@@ -164,8 +207,23 @@ export function GenerateScreen() {
       };
       setMessages((prev) => [...prev, aiMsg]);
 
-      // AI가 추출한 페인트들 추가
+      // AI 응답 DB 저장
+      if (sessionId) await saveMessage(sessionId, "assistant", aiResponse.message);
+
+      // AI가 추출한 페인트들 추가 + DB 저장
       const newPaints = aiResponse.paints.map((p) => toOpenAIPaint(p, "ai"));
+      console.log("[GenerateScreen] 추출된 페인트:", newPaints.map(p => ({ title: p.title, paintKind: p.paintKind })));
+
+      if (sessionId) {
+        const results = await Promise.allSettled(newPaints.map((p) => saveNode(sessionId, p)));
+        results.forEach((r, i) => {
+          if (r.status === "rejected") {
+            console.error(`[GenerateScreen] 페인트 #${i} 저장 실패:`, r.reason);
+          }
+        });
+      } else {
+        console.warn("[GenerateScreen] sessionId 없음 — 노드 DB 저장 스킵");
+      }
       setPaints((prev) => [...newPaints, ...prev]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "알 수 없는 오류";

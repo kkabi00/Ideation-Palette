@@ -14,17 +14,19 @@ import {
   Video,
   ChevronDown,
   ChevronUp,
+  Loader2,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { ScrollArea } from "../components/ui/scroll-area";
 import { Paint, PaintType } from "../components/PaintCard";
-import { 
-  PaletteCluster, 
-  DEFAULT_CLUSTERS, 
-  CLUSTER_DOT, 
-  CLUSTER_BADGE 
+import {
+  PaletteCluster,
+  DEFAULT_CLUSTERS,
+  CLUSTER_DOT,
+  CLUSTER_BADGE
 } from "../types/cluster";
+import { sendToOpenAI, toOpenAIPaint, ConversationMessage } from "../lib/openaiService";
 
 interface ChatMessage {
   id: string;
@@ -63,6 +65,8 @@ export function GenerateScreen() {
   const [paints, setPaints] = useState<Paint[]>([]);
   const [clusters, setClusters] = useState<PaletteCluster[]>(DEFAULT_CLUSTERS);
   const [collapsedClusters, setCollapsedClusters] = useState<Set<string>>(new Set());
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -127,45 +131,58 @@ export function GenerateScreen() {
     return { keyword, context };
   };
 
-  const sendMessage = () => {
-    if (!input.trim()) return;
-    
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userContent = input.trim();
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
       role: "user",
-      content: input,
+      content: userContent,
       extractable: false,
     };
-    setMessages((prev) => [...prev, userMsg]);
-    
-    // 자동으로 유저 메시지만 paint로 추출
-    const userCluster = inferClusterFromContent(input);
-    const { keyword: userKeyword, context: userContext } = extractKeywordsAndContext(input);
-    
-    const userPaint: Paint = {
-      id: `p-${Date.now()}`,
-      title: userKeyword,
-      type: "text",
-      content: userContext,
-      source: "user",
-      tags: [],
-      timestamp: "Just now",
-      cluster: userCluster,
-    };
-    setPaints((prev) => [userPaint, ...prev]);
-    
-    setInput("");
 
-    setTimeout(() => {
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      // 전체 대화 히스토리를 OpenAI에 전달 (시스템 프롬프트 제외)
+      const history: ConversationMessage[] = [
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user", content: userContent },
+      ];
+
+      const aiResponse = await sendToOpenAI(history);
+
       const aiMsg: ChatMessage = {
         id: `msg-${Date.now() + 1}`,
         role: "assistant",
-        content:
-          "생동감 있는 단편이네요! 기대와 우울 사이의 분위기가 느껴집니다. 이것을 더 탐구해볼까요?",
+        content: aiResponse.message,
         extractable: false,
       };
       setMessages((prev) => [...prev, aiMsg]);
-    }, 800);
+
+      // AI가 추출한 페인트들 추가
+      const newPaints = aiResponse.paints.map((p) => toOpenAIPaint(p, "ai"));
+      setPaints((prev) => [...newPaints, ...prev]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "알 수 없는 오류";
+      setError(`API 오류: ${msg}`);
+      // 에러 메시지를 채팅에 표시
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          role: "assistant",
+          content: "죄송합니다, 응답을 받아오는 데 실패했습니다. 다시 시도해주세요.",
+          extractable: false,
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Progress 계산 (사용자 메시지 기준)
@@ -239,6 +256,23 @@ export function GenerateScreen() {
                 </div>
               </div>
             ))}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%]">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Sparkles className="w-3 h-3 text-blue-500" />
+                    <span className="text-[10px] text-gray-400">팔레트 에이전트</span>
+                  </div>
+                  <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce [animation-delay:0ms]" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce [animation-delay:150ms]" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce [animation-delay:300ms]" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
             <div ref={chatEndRef} />
           </div>
         </div>
@@ -257,14 +291,20 @@ export function GenerateScreen() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+                  disabled={isLoading}
                   className="pr-12 h-10 rounded-xl border-gray-200 bg-gray-50"
                 />
                 <Button
                   onClick={sendMessage}
                   size="icon"
-                  className="absolute right-1 top-1 w-8 h-8 rounded-lg bg-blue-500 hover:bg-blue-600"
+                  disabled={isLoading || !input.trim()}
+                  className="absolute right-1 top-1 w-8 h-8 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:opacity-50"
                 >
-                  <Send className="w-3.5 h-3.5" />
+                  {isLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
                 </Button>
               </div>
             </div>

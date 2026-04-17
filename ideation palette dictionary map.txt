@@ -1,0 +1,35 @@
+Ideation Palette/
+├── src/
+│   ├── main.tsx                        # 앱 진입점
+│   ├── app/
+│   │   ├── App.tsx                     # 루트 앱 컴포넌트
+│   │   ├── routes.tsx                  # 라우팅 설정
+│   │   ├── screens/                    # 4단계 플로우 화면
+│   │   │   ├── HomeScreen.tsx          # Start 단계
+│   │   │   ├── GenerateScreen.tsx      # Generation 단계
+│   │   │   ├── PaletteScreen.tsx       # Palette 단계
+│   │   │   ├── ExportScreen.tsx        # Export 단계
+│   │   │   └── SettingsScreen.tsx
+│   │   ├── components/
+│   │   │   ├── LeftNav.tsx
+│   │   │   ├── PaintCard.tsx           # Paint 표시 카드
+│   │   │   ├── TopBar.tsx
+│   │   │   ├── figma/ImageWithFallback.tsx
+│   │   │   └── ui/                     # shadcn/ui 컴포넌트 모음
+│   │   ├── layouts/Root.tsx            # 공통 레이아웃
+│   │   ├── lib/
+│   │   │   ├── supabase.ts             # Supabase 클라이언트
+│   │   │   ├── sessionService.ts       # 세션 관리
+│   │   │   └── openaiService.ts        # 임베딩 서비스
+│   │   └── types/cluster.ts            # 타입 정의
+│   └── styles/                         # CSS / Tailwind / 테마
+├── supabase/
+│   ├── schema.sql                      # DB 스키마
+│   └── migrations/001_prototype_rls.sql
+├── dist/                               # 빌드 결과물
+├── guidelines/Guidelines.md
+├── fix_palette.py                      # 유틸 스크립트
+├── CLAUDE.md / claude.md               # 프로젝트 컨텍스트
+├── .env                                # 환경변수
+├── vite.config.ts
+└── package.json

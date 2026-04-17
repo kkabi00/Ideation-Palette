@@ -1,10 +1,13 @@
 import OpenAI from "openai";
 import { Paint, PaintType } from "../components/PaintCard";
 
-const client = new OpenAI({
-  apiKey: import.meta.env.VITE_OPENAI_API_KEY,
-  dangerouslyAllowBrowser: true,
-});
+function getClient() {
+  const apiKey =
+    localStorage.getItem("ideation-api-key") ??
+    (import.meta as any).env?.VITE_OPENAI_API_KEY ??
+    "";
+  return new OpenAI({ apiKey, dangerouslyAllowBrowser: true });
+}
 
 const SYSTEM_PROMPT = `당신은 Geneplore 모델 기반의 창의적 아이디어 탐색 도우미 "팔레트 에이전트"입니다.
 
@@ -64,7 +67,7 @@ export interface ConversationMessage {
 export async function sendToOpenAI(
   conversationHistory: ConversationMessage[]
 ): Promise<AIResponse> {
-  const response = await client.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: "gpt-4o",
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
@@ -105,7 +108,7 @@ export function toOpenAIPaint(
 export async function extractPaintMeta(
   text: string
 ): Promise<{ label: string; description: string }> {
-  const response = await client.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
@@ -128,14 +131,60 @@ export async function extractPaintMeta(
 
 /** DALL-E 3으로 이미지 URL 생성 */
 export async function generateImage(prompt: string): Promise<string> {
-  const response = await client.images.generate({
+  const response = await getClient().images.generate({
     model: "dall-e-3",
     prompt,
     n: 1,
     size: "1024x1024",
     quality: "standard",
   });
-  const url = response.data[0]?.url;
+  const url = response.data?.[0]?.url;
   if (!url) throw new Error("DALL-E 이미지 URL 없음");
   return url;
+}
+
+// ─── nodeExtractor / bridgePipeline 공유 헬퍼 ───
+
+export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
+export type EmbeddingVector = number[]
+
+export async function chatCompletion(
+  messages: ChatMessage[],
+  options: { model?: string; maxTokens?: number; temperature?: number } = {}
+): Promise<string> {
+  const response = await getClient().chat.completions.create({
+    model: options.model ?? 'gpt-4o-mini',
+    messages,
+    max_tokens: options.maxTokens ?? 1000,
+    temperature: options.temperature ?? 0.7,
+  })
+  return response.choices[0].message.content ?? ''
+}
+
+export function extractJSON<T>(text: string): T | null {
+  const match = text.match(/```json\s*([\s\S]*?)```/)
+  const jsonStr = match ? match[1] : text
+  try {
+    return JSON.parse(jsonStr.trim()) as T
+  } catch {
+    return null
+  }
+}
+
+export async function getEmbedding(text: string): Promise<EmbeddingVector> {
+  const response = await getClient().embeddings.create({
+    model: 'text-embedding-3-small',
+    input: text,
+  })
+  return response.data[0].embedding
+}
+
+export function cosineSimilarity(a: EmbeddingVector, b: EmbeddingVector): number {
+  let dot = 0, normA = 0, normB = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    normA += a[i] * a[i]
+    normB += b[i] * b[i]
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
 }

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import {
   Send,
   Sparkles,
@@ -20,6 +20,8 @@ import {
   Download,
   FolderPlus,
   FilePlus,
+  GitMerge,
+  Layers,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -32,8 +34,11 @@ import {
   PaletteCluster,
   AVAILABLE_COLORS,
 } from "../types/cluster";
-import { loadNodes } from "../lib/sessionService";
-import { generateImage, extractPaintMeta } from "../lib/openaiService";
+import { generateImage, extractPaintMeta, chatCompletion, extractJSON } from "../lib/openaiService";
+import {
+  getSession, saveSession, getAllSessions, createSession,
+  type CanvasSession,
+} from "../lib/sessionStore";
 
 // --- Mock Data with positions ---
 const MOCK_PAINTS: Paint[] = [
@@ -170,10 +175,15 @@ const generateMessageId = () => {
 };
 
 export function PaletteScreen() {
-  const navigate = useNavigate();
-  const [dbLoaded, setDbLoaded] = useState(false);
+  const navigate    = useNavigate();
+  const { id }      = useParams<{ id: string }>();
+
   const [paints, setPaints] = useState<Paint[]>(() => {
-    // 초기값: localStorage fallback
+    if (id) {
+      const session = getSession(id);
+      if (session?.paints && session.paints.length > 0) return session.paints;
+    }
+    // fallback: 이전 방식 localStorage
     try {
       const saved = localStorage.getItem("ideation-paints");
       if (saved) {
@@ -183,26 +193,23 @@ export function PaletteScreen() {
     } catch {}
     return MOCK_PAINTS;
   });
+
+  // 팔레트 변경 시 세션에 저장
+  useEffect(() => {
+    if (!id) return;
+    const session = getSession(id);
+    if (!session) return;
+    saveSession({ ...session, paints, updatedAt: new Date().toISOString() });
+  }, [paints, id]);
+
   const [deletedPaints, setDeletedPaints] = useState<Paint[]>([]);
   const [showTrashModal, setShowTrashModal] = useState(false);
 
-  // DB에서 노드 로드 (Supabase 설정된 경우)
-  useEffect(() => {
-    const sessionId = localStorage.getItem("ideation-session-id");
-    if (!sessionId || dbLoaded) return;
-    loadNodes(sessionId).then((nodes) => {
-      if (nodes.length > 0) {
-        // x/y 좌표가 없으면 격자 배치
-        const positioned = nodes.map((n, i) => ({
-          ...n,
-          x: n.x ?? 120 + (i % 4) * 300,
-          y: n.y ?? 100 + Math.floor(i / 4) * 220,
-        }));
-        setPaints(positioned);
-      }
-      setDbLoaded(true);
-    });
-  }, [dbLoaded]);
+  // 다른 캔버스와 조합 관련 상태
+  const [showCombineDialog, setShowCombineDialog] = useState(false);
+  const [otherSessions, setOtherSessions] = useState<CanvasSession[]>([]);
+  const [selectedOtherSession, setSelectedOtherSession] = useState<CanvasSession | null>(null);
+  const [selectedOtherPaints, setSelectedOtherPaints] = useState<string[]>([]);
   const [selectedPaint, setSelectedPaint] = useState<string | null>(null);
   const [editingPaint, setEditingPaint] = useState<string | null>(null);
   const [combineMode, setCombineMode] = useState(false);
@@ -233,6 +240,8 @@ export function PaletteScreen() {
   const [mediaCreationMode, setMediaCreationMode] = useState<"image" | "video" | null>(null);
   const [isMediaCreationSession, setIsMediaCreationSession] = useState(false);
   const [extractingMsgId, setExtractingMsgId] = useState<string | null>(null);
+  const [bridgeSuggestion, setBridgeSuggestion] = useState<{ label: string; description: string } | null>(null);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -248,46 +257,60 @@ export function PaletteScreen() {
     );
   };
 
-  // Generate combine suggestions when selection changes
+  // Generate combine suggestions + bridge when selection changes
   useEffect(() => {
     if (combineMode && combineSelection.length >= 2) {
       const selectedPaints = paints.filter((p) => combineSelection.includes(p.id));
-      
-      // 초기 메시지: 조합에 대한 질문
       const paint1 = selectedPaints[0];
       const paint2 = selectedPaints[1];
-      
+
       setExploreMessages([
         {
           id: generateMessageId(),
           role: "assistant",
-          content: `"${paint1.title}"과(와) "${paint2.title}"을(를) 조합하면, 어떻게 될 것 같나요? 어떤 느낌이 드나요?`,
+          content: `"${paint1.title}"과(와) "${paint2.title}"을(를) 조합하면, 어떻게 될 것 같나요?`,
         },
       ]);
-      
-      // 2개의 합성 옵션만 제공
-      const suggestions: CombineSuggestion[] = [
-        {
-          id: "s1",
-          title: "이미지로 합성",
-          description: "",
-          rationale: "",
-          type: "image",
-        },
-        {
-          id: "s2",
-          title: "비디오로 합성",
-          description: "",
-          rationale: "",
-          type: "video",
-        },
-      ];
-      
-      setCombineSuggestions(suggestions);
-      setCombineMethodSelected(false); // 조합 선택 초기화
+
+      setCombineSuggestions([
+        { id: "s1", title: "이미지로 합성", description: "", rationale: "", type: "image" },
+        { id: "s2", title: "비디오로 합성", description: "", rationale: "", type: "video" },
+      ]);
+      setCombineMethodSelected(false);
+
+      // Bridge 연상 자동 생성
+      setBridgeSuggestion(null);
+      setBridgeLoading(true);
+      const prompt = `다음 두 개념은 창의적 아이디어 프로젝트의 재료들입니다.
+
+개념 A: "${paint1.title}" — ${paint1.content}
+개념 B: "${paint2.title}" — ${paint2.content}
+
+이 두 개념 사이를 원격 연상(remote association)으로 연결할 수 있는 매개 개념 하나를 찾아주세요.
+단순 합성이 아닌, 예상치 못한 창의적 연결이어야 합니다.
+
+규칙:
+- label: 5자 이내 한국어
+- description: 왜 이 두 개념을 연결하는지 한 문장 (한국어)
+- 아래 JSON만 출력 (설명 없이)
+
+\`\`\`json
+{"label": "매개개념", "description": "연결 이유 한 문장"}
+\`\`\``;
+
+      chatCompletion([{ role: 'user', content: prompt }], { model: 'gpt-4o-mini', maxTokens: 200, temperature: 0.9 })
+        .then(raw => {
+          const result = extractJSON<{ label: string; description: string }>(raw);
+          if (result?.label) setBridgeSuggestion(result);
+        })
+        .catch(() => {})
+        .finally(() => setBridgeLoading(false));
+
     } else {
       setCombineSuggestions([]);
       setCombineMethodSelected(false);
+      setBridgeSuggestion(null);
+      setBridgeLoading(false);
     }
   }, [combineMode, combineSelection]);
 
@@ -1128,10 +1151,25 @@ export function PaletteScreen() {
               <Maximize2 className="w-4 h-4" />
             </Button>
             <div className="w-px h-6 bg-gray-200" />
-            <Button 
-              variant="outline" 
-              size="sm" 
-              onClick={() => navigate("/export")} 
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setOtherSessions(getAllSessions().filter(s => s.id !== id && (s.paints.length > 0 || s.nodes.length > 0)));
+                setSelectedOtherSession(null);
+                setSelectedOtherPaints([]);
+                setShowCombineDialog(true);
+              }}
+              className="gap-2"
+            >
+              <GitMerge className="w-4 h-4" />
+              캔버스 조합
+            </Button>
+            <div className="w-px h-6 bg-gray-200" />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(id ? `/session/${id}/export` : "/export")}
               className="gap-2"
             >
               <Download className="w-4 h-4" />
@@ -1512,10 +1550,57 @@ export function PaletteScreen() {
                       ))}
                     </div>
 
+                    {/* Bridge 연상 제안 */}
+                    <div className="pt-2 border-t border-gray-200">
+                      <p className="text-xs text-gray-500 mb-2 flex items-center gap-1">
+                        <span style={{ color: '#EF9F27' }}>◆</span> Bridge 연상
+                      </p>
+                      {bridgeLoading ? (
+                        <div className="text-xs text-gray-400 py-2 flex items-center gap-2">
+                          <span className="w-3 h-3 border border-gray-300 border-t-transparent rounded-full animate-spin inline-block" />
+                          연결 고리 찾는 중...
+                        </div>
+                      ) : bridgeSuggestion ? (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium text-amber-800">{bridgeSuggestion.label}</span>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 text-xs text-amber-700 hover:bg-amber-100 px-2"
+                              onClick={() => {
+                                const sel = combineSelection;
+                                const p = paints.find(p => p.id === sel[0]);
+                                const newPaint: Paint = {
+                                  id: `bridge_${Date.now()}`,
+                                  title: bridgeSuggestion.label,
+                                  type: "text",
+                                  content: bridgeSuggestion.description,
+                                  source: "ai",
+                                  tags: ["bridge"],
+                                  paintKind: "bridge",
+                                  timestamp: new Date().toISOString(),
+                                  cluster: p?.cluster || "visual-tone",
+                                  derivedFrom: [...sel],
+                                  x: p ? (p.x ?? 300) + 320 : 1000,
+                                  y: p?.y ?? 400,
+                                };
+                                setPaints(prev => [...prev, newPaint]);
+                                setBridgeSuggestion(null);
+                              }}
+                            >
+                              + 추가
+                            </Button>
+                          </div>
+                          <p className="text-xs text-amber-700">{bridgeSuggestion.description}</p>
+                        </div>
+                      ) : null}
+                    </div>
+
                     {/* Suggestion Buttons - 이미지/비디오 선택 또는 채팅 전송 전에만 표시 */}
                     {!combineMethodSelected && (
                       <div className="pt-2 border-t border-gray-200">
-                        <p className="text-xs text-gray-500 mb-3">혹은 예상 결과물을 만들어볼 수 있어요</p>
+                        <p className="text-xs text-gray-500 mb-3">예상 결과물 만들기</p>
                         <div className="flex flex-col gap-2">
                           {combineSuggestions.map((suggestion) => (
                             <Button
@@ -1565,38 +1650,93 @@ export function PaletteScreen() {
                       </div>
                     )}
                   </div>
+                ) : combineMode && combineSelection.length === 1 ? (
+                  /* 두 번째 노드 선택 패널 */
+                  <div className="space-y-4">
+                    <div className="p-3 rounded-xl bg-blue-50 border border-blue-200">
+                      <p className="text-xs font-medium text-blue-700 mb-1">조합할 첫 번째 노드</p>
+                      <PaintCard
+                        paint={paints.find(p => p.id === combineSelection[0])!}
+                        size="compact"
+                      />
+                    </div>
+
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">두 번째 노드를 선택하세요</p>
+                      <div className="flex flex-col gap-2">
+                        {paints
+                          .filter(p => p.id !== combineSelection[0])
+                          .map(p => (
+                            <button
+                              key={p.id}
+                              onClick={() => setCombineSelection([combineSelection[0], p.id])}
+                              className="text-left p-3 rounded-xl border border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-all"
+                            >
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-sm font-medium text-gray-900 truncate">{p.title}</span>
+                                {p.paintKind && (
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ml-1 ${
+                                    p.paintKind === 'explicit' ? 'bg-emerald-100 text-emerald-700' :
+                                    p.paintKind === 'implicit' ? 'bg-violet-100 text-violet-700' :
+                                    'bg-amber-100 text-amber-700'
+                                  }`}>
+                                    {p.paintKind === 'explicit' ? '명시' : p.paintKind === 'implicit' ? '묵시' : '브릿지'}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-gray-400 truncate">{p.content}</p>
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full text-gray-400"
+                      onClick={() => { setCombineMode(false); setCombineSelection([]); }}
+                    >
+                      취소
+                    </Button>
+                  </div>
+
                 ) : selectedPaintData ? (
                   /* Explore Panel */
                   <div className="space-y-4">
-                    {/* Selected Paint Info */}
+                    {/* Selected Paint Info + 조합 primary CTA */}
                     <div className="p-3 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
                       <PaintCard paint={selectedPaintData} size="compact" />
                       <Button
-                        variant="outline"
                         size="sm"
-                        className="w-full justify-start gap-2 text-blue-600 border-blue-200 hover:bg-blue-50"
-                        onClick={() => {
-                          const src = selectedPaintData;
-                          const newPaint: Paint = {
-                            ...src,
-                            id: `p${Date.now()}`,
-                            timestamp: new Date().toISOString(),
-                            derivedFrom: [src.id],
-                            x: (src.x ?? 300) + 320,
-                            y: src.y ?? 200,
-                          };
-                          setPaints((prev) => [...prev, newPaint]);
-                        }}
+                        onClick={handleStartCombine}
+                        className="w-full gap-2 bg-gray-900 hover:bg-gray-700"
                       >
-                        <Plus className="w-4 h-4" />
-                        캔버스에 추가
+                        <Combine className="w-4 h-4" />
+                        다른 노드와 조합하기
                       </Button>
                     </div>
 
-                    {/* Quick Actions */}
+                    {/* 기타 액션 */}
                     <div className="space-y-2">
-                      <p className="text-xs text-gray-500 uppercase tracking-wide">빠른 작업</p>
+                      <p className="text-xs text-gray-400 uppercase tracking-wide">더보기</p>
                       <div className="flex flex-col gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            const src = selectedPaintData;
+                            setPaints(prev => [...prev, {
+                              ...src, id: `p${Date.now()}`,
+                              timestamp: new Date().toISOString(),
+                              derivedFrom: [src.id],
+                              x: (src.x ?? 300) + 320, y: src.y ?? 200,
+                            }]);
+                          }}
+                          className="w-full justify-start gap-2"
+                        >
+                          <Plus className="w-4 h-4" />
+                          복제
+                        </Button>
                         <Button
                           variant="outline"
                           size="sm"
@@ -1605,15 +1745,6 @@ export function PaletteScreen() {
                         >
                           <Trash2 className="w-4 h-4" />
                           삭제
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleStartCombine}
-                          className="w-full justify-start gap-2"
-                        >
-                          <Combine className="w-4 h-4" />
-                          조합
                         </Button>
                         {selectedPaintData.type !== "audio" && (
                           <>
@@ -1976,6 +2107,133 @@ export function PaletteScreen() {
               </div>
             )}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 다른 캔버스와 조합 다이얼로그 */}
+      <Dialog open={showCombineDialog} onOpenChange={setShowCombineDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <GitMerge className="w-5 h-5 text-amber-500" />
+              다른 캔버스와 조합하기
+            </DialogTitle>
+            <DialogDescription>
+              조합할 캔버스를 선택하고, 가져올 재료를 골라주세요. 새로운 조합 캔버스가 생성됩니다.
+            </DialogDescription>
+          </DialogHeader>
+
+          {otherSessions.length === 0 ? (
+            <div className="text-center py-10">
+              <Layers className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+              <p className="text-sm text-gray-500">조합할 다른 캔버스가 없습니다.</p>
+              <p className="text-xs text-gray-400 mt-1">홈에서 새 캔버스를 만들어보세요.</p>
+            </div>
+          ) : (
+            <div className="space-y-4 pt-2">
+              {/* 캔버스 선택 */}
+              {!selectedOtherSession ? (
+                <div className="grid grid-cols-2 gap-3">
+                  {otherSessions.map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => { setSelectedOtherSession(s); setSelectedOtherPaints([]); }}
+                      className="text-left p-4 rounded-xl border border-gray-200 hover:border-amber-300 hover:bg-amber-50 transition-all"
+                    >
+                      <div className="text-sm font-medium text-gray-900 mb-1 line-clamp-2">{s.title}</div>
+                      <div className="text-xs text-gray-400">{(s.paints.length || s.nodes.length)}개 재료</div>
+                      {s.nodes.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {Array.from(new Set(s.nodes.map(n => n.category))).slice(0, 3).map(cat => (
+                            <span key={cat} className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">{cat}</span>
+                          ))}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  {/* 선택된 캔버스의 재료 목록 */}
+                  <div className="flex items-center gap-2 mb-3">
+                    <button onClick={() => setSelectedOtherSession(null)} className="text-xs text-gray-400 hover:text-gray-600">← 뒤로</button>
+                    <span className="text-sm font-medium text-gray-900">{selectedOtherSession.title}</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mb-3">가져올 재료를 선택하세요 (복수 선택 가능)</p>
+                  <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto">
+                    {(selectedOtherSession.paints.length > 0 ? selectedOtherSession.paints : []).map(paint => {
+                      const isSelected = selectedOtherPaints.includes(paint.id);
+                      return (
+                        <button
+                          key={paint.id}
+                          onClick={() => setSelectedOtherPaints(prev =>
+                            isSelected ? prev.filter(p => p !== paint.id) : [...prev, paint.id]
+                          )}
+                          className={`text-left p-3 rounded-xl border text-sm transition-all ${
+                            isSelected ? 'border-amber-400 bg-amber-50' : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-medium text-gray-900 truncate">{paint.title}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 text-amber-500 shrink-0" />}
+                          </div>
+                          <p className="text-xs text-gray-500 line-clamp-2">{paint.content}</p>
+                          {paint.paintKind && (
+                            <span className={`mt-1.5 inline-block text-[10px] px-1.5 py-0.5 rounded-full ${
+                              paint.paintKind === 'explicit' ? 'bg-emerald-100 text-emerald-700' :
+                              paint.paintKind === 'implicit' ? 'bg-violet-100 text-violet-700' :
+                              'bg-amber-100 text-amber-700'
+                            }`}>
+                              {paint.paintKind === 'explicit' ? '명시' : paint.paintKind === 'implicit' ? '묵시' : '브릿지'}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex gap-2 pt-2 border-t border-gray-100">
+                    <Button variant="outline" className="flex-1" onClick={() => setShowCombineDialog(false)}>
+                      취소
+                    </Button>
+                    <Button
+                      className="flex-1 gap-2 bg-amber-500 hover:bg-amber-600"
+                      disabled={selectedOtherPaints.length === 0}
+                      onClick={() => {
+                        // 현재 캔버스 + 선택한 재료를 합쳐 새 조합 세션 생성
+                        const sourcePaints  = selectedOtherPaints
+                          .map(pid => selectedOtherSession!.paints.find(p => p.id === pid))
+                          .filter(Boolean) as Paint[];
+
+                        const combinedPaints: Paint[] = [
+                          ...paints.map((p, i) => ({ ...p, x: 80 + (i % 4) * 290, y: 80 + Math.floor(i / 4) * 200 })),
+                          ...sourcePaints.map((p, i) => ({
+                            ...p,
+                            id: `${p.id}_from_${selectedOtherSession!.id}`,
+                            x: 80 + ((paints.length + i) % 4) * 290,
+                            y: 80 + Math.floor((paints.length + i) / 4) * 200,
+                          })),
+                        ];
+
+                        const newSession = createSession({
+                          combineSourceIds: [id!, selectedOtherSession!.id],
+                          pendingStartMessage: `"${
+                            (getSession(id!)?.title ?? '이 캔버스')
+                          }"와 "${selectedOtherSession!.title}"의 재료들을 조합해보겠습니다.`,
+                        });
+                        saveSession({ ...newSession, paints: combinedPaints, status: 'combining' });
+                        setShowCombineDialog(false);
+                        navigate(`/session/${newSession.id}/generate`);
+                      }}
+                    >
+                      <GitMerge className="w-4 h-4" />
+                      조합 캔버스 만들기 ({selectedOtherPaints.length}개 선택)
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

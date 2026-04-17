@@ -1,8 +1,9 @@
-import { Zap, Wand2, Palette, Download } from "lucide-react";
-import { Link, useLocation } from "react-router";
+import { Zap, Wand2, Palette, Download, KeyRound } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router";
 
 export function LeftNav() {
   const location = useLocation();
+  const navigate = useNavigate();
 
   const flowItems = [
     { label: "Start", icon: Zap, path: "/" },
@@ -74,6 +75,19 @@ export function LeftNav() {
           })}
         </div>
       </nav>
+
+      {/* API 키 변경 */}
+      <div className="pb-4 flex justify-center">
+        <button
+          onClick={() => navigate("/setup")}
+          className="w-10 h-10 rounded-xl flex items-center justify-center text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-all group relative"
+        >
+          <KeyRound className="w-[18px] h-[18px]" />
+          <div className="absolute left-full ml-2 px-2 py-1 rounded-md bg-gray-900 text-white text-[11px] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-50">
+            API 키 변경
+          </div>
+        </button>
+      </div>
     </div>
   );
 }

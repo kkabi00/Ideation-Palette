@@ -1,9 +1,10 @@
-import { createBrowserRouter } from "react-router";
+import { createHashRouter } from "react-router";
 import { Root } from "./layouts/Root";
 import { HomeScreen } from "./screens/HomeScreen";
-import { GenerateScreen } from "./screens/GenerateScreen";
+import GenerateScreen from "./screens/GenerateScreen.example";
 import { PaletteScreen } from "./screens/PaletteScreen";
 import { ExportScreen } from "./screens/ExportScreen";
+import { ApiKeyScreen } from "./screens/ApiKeyScreen";
 
 function RouteError() {
   return (
@@ -24,16 +25,17 @@ function RouteError() {
   );
 }
 
-export const router = createBrowserRouter([
+export const router = createHashRouter([
+  { path: "/setup", element: <ApiKeyScreen /> },
   {
     path: "/",
     element: <Root />,
     errorElement: <RouteError />,
     children: [
       { index: true, element: <HomeScreen /> },
-      { path: "generate", element: <GenerateScreen /> },
-      { path: "palette", element: <PaletteScreen /> },
-      { path: "export", element: <ExportScreen /> },
+      { path: "session/:id/generate", element: <GenerateScreen /> },
+      { path: "session/:id/palette",  element: <PaletteScreen /> },
+      { path: "session/:id/export",   element: <ExportScreen /> },
     ],
   },
 ]);

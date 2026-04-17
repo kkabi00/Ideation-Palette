@@ -1,9 +1,17 @@
-import { Outlet, useLocation } from "react-router";
+import { Outlet, useLocation, useNavigate } from "react-router";
+import { useEffect } from "react";
 import { LeftNav } from "../components/LeftNav";
 import { TopBar } from "../components/TopBar";
 
 export function Root() {
   const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!localStorage.getItem("ideation-api-key")) {
+      navigate("/setup");
+    }
+  }, []);
 
   // Only show top bar on export
   const showTopBar = location.pathname === "/export";

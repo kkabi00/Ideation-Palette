@@ -9,7 +9,10 @@
       "Bash(rm fix_combine.js)",
       "Bash(mv \"c:/Users/limkk/Documents/GitHub/Ideation Palette/fix_combine.js\" \"c:/Users/limkk/Documents/GitHub/Ideation Palette/fix_combine.cjs\")",
       "Bash(node fix_combine.cjs)",
-      "Bash(rm fix_combine.cjs)"
+      "Bash(rm fix_combine.cjs)",
+      "Bash(npx tsc *)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(npx vite *)"
     ]
   }
 }

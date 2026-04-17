@@ -8,7 +8,9 @@ export function Root() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!localStorage.getItem("ideation-api-key")) {
+    const hasLocalKey = !!localStorage.getItem("ideation-api-key");
+    const hasEnvKey = !!(import.meta as any).env?.VITE_OPENAI_API_KEY;
+    if (!hasLocalKey && !hasEnvKey) {
       navigate("/setup");
     }
   }, []);

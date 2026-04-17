@@ -12,7 +12,8 @@
       "Bash(rm fix_combine.cjs)",
       "Bash(npx tsc *)",
       "Bash(node_modules/.bin/tsc --noEmit)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "WebFetch(domain:kkabi00.github.io)"
     ]
   }
 }

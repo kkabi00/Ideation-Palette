@@ -14,7 +14,9 @@
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(npx vite *)",
       "WebFetch(domain:kkabi00.github.io)",
-      "Bash(npx plugins *)"
+      "Bash(npx plugins *)",
+      "mcp__plugin_vercel_vercel__deploy_to_vercel",
+      "Bash(npx vercel *)"
     ]
   }
 }
